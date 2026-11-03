@@ -13,12 +13,19 @@ A tiny todo list that lives in your MacBook's notch. Hover the notch and it drop
 - Tasks are stored locally as JSON in `~/Library/Application Support/NotchTodo/todos.json`. No account, no network.
 - On a Mac without a notch, the middle of the menu bar acts as the hover zone.
 
-## Requirements
+## Download
 
-- macOS 14 or later
-- Command Line Tools (`xcode-select --install`). Xcode is not needed: the app is a single Objective-C file built with `clang`.
+1. Download **NotchTodo.zip** from the [latest release](https://github.com/aneeshkaravadi/notch-todo/releases/latest).
+2. Unzip it and drag **NotchTodo.app** into your Applications folder.
+3. Open it. The app isn't notarized by Apple, so macOS blocks it the first time. Go to **System Settings → Privacy & Security**, scroll down to the message about NotchTodo, and click **Open Anyway**. You only need to do this once.
 
-## Build and install
+   Or run this in Terminal instead: `xattr -dr com.apple.quarantine /Applications/NotchTodo.app`
+
+There's no Dock icon. Hover the notch to use it, and quit from ⋯ → Quit NotchTodo. Runs on macOS 14 or later, on Apple silicon and Intel Macs.
+
+## Build from source
+
+You need the Command Line Tools (`xcode-select --install`). Xcode is not needed: the app is a single Objective-C file built with `clang`.
 
 ```bash
 git clone https://github.com/aneeshkaravadi/notch-todo.git
@@ -26,7 +33,7 @@ cd notch-todo
 ./build.sh install
 ```
 
-`./build.sh` on its own builds `build/NotchTodo.app`. With `install` it also copies the app to `~/Applications` and launches it. Quit it from ⋯ → Quit NotchTodo.
+`./build.sh` on its own builds `build/NotchTodo.app`. With `install` it also copies the app to `~/Applications` and launches it.
 
 ## Options
 

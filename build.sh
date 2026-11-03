@@ -7,7 +7,8 @@ APP=build/NotchTodo.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp Info.plist "$APP/Contents/Info.plist"
-clang -O2 -fobjc-arc -Wall -mmacosx-version-min=14.0 \
+# Universal so the same download runs on Apple silicon and Intel Macs.
+clang -O2 -fobjc-arc -Wall -mmacosx-version-min=14.0 -arch arm64 -arch x86_64 \
   -framework Cocoa -framework QuartzCore -framework ServiceManagement \
   NotchTodo.m -o "$APP/Contents/MacOS/NotchTodo"
 codesign --force --sign - "$APP"
