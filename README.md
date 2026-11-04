@@ -13,13 +13,27 @@ A tiny todo list that lives in your MacBook's notch. Hover the notch and it drop
 - Tasks are stored locally as JSON in `~/Library/Application Support/NotchTodo/todos.json`. No account, no network.
 - On a Mac without a notch, the middle of the menu bar acts as the hover zone.
 
-## Download
+## Install
+
+NotchTodo is free and isn't notarized by Apple (that needs a paid developer account). So if you download it in a browser, macOS blocks it the first time you open it. Installing from Terminal avoids that warning.
+
+### Option 1: Terminal (no warning)
+
+Paste this into Terminal. It downloads the latest release into Applications and opens it:
+
+```bash
+curl -fsSL https://github.com/aneeshkaravadi/notch-todo/releases/latest/download/NotchTodo.zip -o "$TMPDIR/NotchTodo.zip" && ditto -x -k "$TMPDIR/NotchTodo.zip" /Applications && open /Applications/NotchTodo.app
+```
+
+macOS only quarantines files downloaded by apps like Safari and Chrome, so this copy opens normally. Run the same command again later to update (quit NotchTodo first).
+
+### Option 2: Download the zip
 
 1. Download **NotchTodo.zip** from the [latest release](https://github.com/aneeshkaravadi/notch-todo/releases/latest).
 2. Unzip it and drag **NotchTodo.app** into your Applications folder.
-3. Open it. The app isn't notarized by Apple, so macOS blocks it the first time. Go to **System Settings → Privacy & Security**, scroll down to the message about NotchTodo, and click **Open Anyway**. You only need to do this once.
+3. Open it. macOS says it can't verify the app. Close the warning without picking Move to Trash, then go to **System Settings → Privacy & Security**, scroll down to the message about NotchTodo, and click **Open Anyway**. You only need to do this once.
 
-   Or run this in Terminal instead: `xattr -dr com.apple.quarantine /Applications/NotchTodo.app`
+   Or clear the block from Terminal: `xattr -dr com.apple.quarantine /Applications/NotchTodo.app`
 
 There's no Dock icon. Hover the notch to use it, and quit from ⋯ → Quit NotchTodo. Runs on macOS 14 or later, on Apple silicon and Intel Macs.
 
