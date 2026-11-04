@@ -44,3 +44,7 @@ cd notch-todo
 ## Credits
 
 The approach for placing a window over the notch follows [TodoMenu](https://github.com/mitian233/TodoMenu) and [NotchDrop](https://github.com/Lakr233/NotchDrop).
+
+## License
+
+[MIT](LICENSE)
