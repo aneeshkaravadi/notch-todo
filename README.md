@@ -14,7 +14,7 @@ With tasks left, a color ring moves around the closed notch:
 - Type a task and press Return to add it. Click a task to check it off; click × to delete it.
 - Finished tasks sink to the bottom. Clear them from the ⋯ menu.
 - While any task is unchecked, a moving color ring surrounds the notch so you can't forget about it. It disappears once everything is checked off.
-- Pick the ring's colors (Rainbow, Sunset, Ocean, Aurora, Candy or your own three) and its speed in ⋯ → Settings….
+- Pick the ring's colors (Rainbow, Sunset, Ocean, Aurora, Candy or your own three), speed, saturation and brightness in ⋯ → Settings….
 - You can pause the ring for 30 minutes at a time, but there's no off switch: a pause always ends on its own.
 - Open at Login toggle in the ⋯ menu.
 - Tasks are stored locally as JSON in `~/Library/Application Support/NotchTodo/todos.json`. No account, no network.
