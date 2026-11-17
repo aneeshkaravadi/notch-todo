@@ -49,6 +49,126 @@ static CGPathRef CreateNotchPath(CGRect bounds, CGFloat centerX, CGFloat width, 
     return p;
 }
 
+// The notch outline grown by `gap` on every side, open at the top so it runs into the screen edge.
+static CGPathRef CreateRingPath(CGRect notch, CGFloat gap) {
+    const CGFloat flare = 6, radius = 10 + gap; // close to the physical notch's own corners
+    CGFloat top = CGRectGetMaxY(notch), bottom = CGRectGetMinY(notch) - gap;
+    CGFloat left = CGRectGetMinX(notch) - gap, right = CGRectGetMaxX(notch) + gap;
+    CGMutablePathRef p = CGPathCreateMutable();
+    CGPathMoveToPoint(p, NULL, left - 2, top + 1);
+    CGPathAddQuadCurveToPoint(p, NULL, left + flare, top, left + flare, top - flare);
+    CGPathAddArcToPoint(p, NULL, left + flare, bottom, left + flare + radius, bottom, radius);
+    CGPathAddArcToPoint(p, NULL, right - flare, bottom, right - flare, bottom + radius, radius);
+    CGPathAddLineToPoint(p, NULL, right - flare, top - flare);
+    CGPathAddQuadCurveToPoint(p, NULL, right - flare, top, right + 2, top + 1);
+    return p;
+}
+
+#pragma mark - Ring settings
+
+static const NSTimeInterval kPauseLength = 30 * 60;
+
+static NSArray<NSString *> *PaletteNames(void) {
+    return @[@"Rainbow", @"Sunset", @"Ocean", @"Aurora", @"Candy", @"Custom"];
+}
+
+static NSArray<NSString *> *PaletteHexes(NSString *name) {
+    static NSDictionary *palettes;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        palettes = @{
+            @"Rainbow": @[@"FF3B30", @"FF9500", @"FFCC00", @"34C759", @"00C7BE", @"007AFF", @"AF52DE", @"FF2D55"],
+            @"Sunset": @[@"FF2D55", @"FF5E3A", @"FF9500", @"FFCC00", @"AF52DE"],
+            @"Ocean": @[@"00C7BE", @"32ADE6", @"007AFF", @"5856D6", @"30D158"],
+            @"Aurora": @[@"30D158", @"00C7BE", @"5E5CE6", @"BF5AF2"],
+            @"Candy": @[@"FF2D55", @"FF6FD8", @"BF5AF2", @"64D2FF"],
+        };
+    });
+    return palettes[name] ?: palettes[@"Rainbow"];
+}
+
+static NSColor *ColorFromHex(NSString *hex) {
+    unsigned int value = 0;
+    if (![[NSScanner scannerWithString:hex] scanHexInt:&value]) return NSColor.whiteColor;
+    return [NSColor colorWithSRGBRed:((value >> 16) & 0xFF) / 255.0 green:((value >> 8) & 0xFF) / 255.0
+                                blue:(value & 0xFF) / 255.0 alpha:1];
+}
+
+static NSString *HexFromColor(NSColor *color) {
+    NSColor *c = [color colorUsingColorSpace:NSColorSpace.sRGBColorSpace] ?: NSColor.whiteColor;
+    return [NSString stringWithFormat:@"%02X%02X%02X", (int)lround(c.redComponent * 255),
+                                      (int)lround(c.greenComponent * 255), (int)lround(c.blueComponent * 255)];
+}
+
+// The ring around the notch: which colors, how fast they move, and the 30-minute pause.
+// There is deliberately no off switch; a pause always ends on its own.
+@interface RingSettings : NSObject
+@property (nonatomic, copy) NSString *palette;
+@property (nonatomic, copy) NSArray<NSColor *> *customColors;
+@property (nonatomic) double speed;              // 0 = slow, 1 = fast
+@property (nonatomic) NSTimeInterval pausedUntil; // seconds since 1970; 0 when running
+@property (nonatomic, copy) void (^onChange)(void);
+@property (nonatomic, readonly) NSArray<NSColor *> *colors;
+@property (nonatomic, readonly) NSTimeInterval period; // seconds per full turn
+@property (nonatomic, readonly) BOOL isPaused;
+- (void)pause;
+- (void)resume;
+- (void)save;
+@end
+
+@implementation RingSettings
+
+- (instancetype)init {
+    if ((self = [super init])) {
+        NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+        NSString *palette = [d stringForKey:@"RingPalette"];
+        _palette = [PaletteNames() containsObject:palette] ? palette : @"Rainbow";
+        NSArray *hexes = [d arrayForKey:@"RingCustomColors"];
+        if (hexes.count != 3) hexes = @[@"FF2D55", @"FFD60A", @"0A84FF"];
+        NSMutableArray *custom = [NSMutableArray array];
+        for (id hex in hexes) [custom addObject:ColorFromHex([hex isKindOfClass:NSString.class] ? hex : @"FFFFFF")];
+        _customColors = custom;
+        _speed = [d objectForKey:@"RingSpeed"] ? MAX(0, MIN(1, [d doubleForKey:@"RingSpeed"])) : 0.5;
+        // Never honor a pause longer than 30 minutes, even if the saved value says otherwise.
+        _pausedUntil = MIN([d doubleForKey:@"RingPausedUntil"], NSDate.date.timeIntervalSince1970 + kPauseLength);
+    }
+    return self;
+}
+
+- (NSArray<NSColor *> *)colors {
+    if ([_palette isEqual:@"Custom"]) return _customColors;
+    NSMutableArray *colors = [NSMutableArray array];
+    for (NSString *hex in PaletteHexes(_palette)) [colors addObject:ColorFromHex(hex)];
+    return colors;
+}
+
+- (NSTimeInterval)period { return 14.0 * pow(1.2 / 14.0, _speed); }
+
+- (BOOL)isPaused { return _pausedUntil > NSDate.date.timeIntervalSince1970; }
+
+- (void)pause {
+    _pausedUntil = NSDate.date.timeIntervalSince1970 + kPauseLength;
+    [self save];
+}
+
+- (void)resume {
+    _pausedUntil = 0;
+    [self save];
+}
+
+- (void)save {
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    [d setObject:_palette forKey:@"RingPalette"];
+    NSMutableArray *hexes = [NSMutableArray array];
+    for (NSColor *c in _customColors) [hexes addObject:HexFromColor(c)];
+    [d setObject:hexes forKey:@"RingCustomColors"];
+    [d setDouble:_speed forKey:@"RingSpeed"];
+    [d setDouble:_pausedUntil forKey:@"RingPausedUntil"];
+    if (self.onChange) self.onChange();
+}
+
+@end
+
 #pragma mark - Storage
 
 @interface Todo : NSObject
@@ -234,6 +354,124 @@ static CGPathRef CreateNotchPath(CGRect bounds, CGFloat centerX, CGFloat width, 
 
 @end
 
+// A glowing ring hugging the notch. A conic gradient spins behind a ring-shaped mask, so the
+// colors travel around the notch without redrawing anything.
+@interface RingView : NSView
+- (void)setNotchRect:(NSRect)notch colors:(NSArray<NSColor *> *)colors period:(NSTimeInterval)period;
+- (void)setShown:(BOOL)shown animated:(BOOL)animated;
+@end
+
+@implementation RingView {
+    CALayer *_host;
+    CAGradientLayer *_gradient;
+    CALayer *_mask;
+    CAShapeLayer *_glow, *_core;
+    NSTimeInterval _period;
+    BOOL _shown;
+}
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.wantsLayer = YES;
+        _host = [CALayer layer];
+        _host.opacity = 0;
+
+        _gradient = [CAGradientLayer layer];
+        _gradient.type = kCAGradientLayerConic;
+        _gradient.startPoint = CGPointMake(0.5, 0.5);
+        _gradient.endPoint = CGPointMake(0.5, 0);
+        [_host addSublayer:_gradient];
+
+        _mask = [CALayer layer];
+        _glow = [CAShapeLayer layer];
+        _glow.fillColor = nil;
+        _glow.strokeColor = [NSColor colorWithWhite:1 alpha:0.35].CGColor;
+        _glow.lineWidth = 8;
+        _glow.lineJoin = kCALineJoinRound;
+        _glow.shadowColor = NSColor.whiteColor.CGColor;
+        _glow.shadowOpacity = 0.8;
+        _glow.shadowRadius = 4;
+        _glow.shadowOffset = CGSizeZero;
+        _core = [CAShapeLayer layer];
+        _core.fillColor = nil;
+        _core.strokeColor = NSColor.whiteColor.CGColor;
+        _core.lineWidth = 2.5;
+        _core.lineJoin = kCALineJoinRound;
+        [_mask addSublayer:_glow];
+        [_mask addSublayer:_core];
+        _host.mask = _mask;
+        [self.layer addSublayer:_host];
+    }
+    return self;
+}
+
+- (NSView *)hitTest:(NSPoint)point { return nil; }
+
+- (void)setNotchRect:(NSRect)notch colors:(NSArray<NSColor *> *)colors period:(NSTimeInterval)period {
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _host.frame = self.bounds;
+    _mask.frame = _host.bounds;
+    _glow.frame = _mask.bounds;
+    _core.frame = _mask.bounds;
+    CGPathRef path = CreateRingPath(notch, 3);
+    _glow.path = path;
+    _core.path = path;
+    CGPathRelease(path);
+
+    // Spin around the middle of the notch's top edge; the visible half of the circle is the ring.
+    CGFloat side = 2 * hypot(NSWidth(notch) / 2 + 24, NSHeight(notch) + 24);
+    _gradient.bounds = CGRectMake(0, 0, side, side);
+    _gradient.position = CGPointMake(NSMidX(notch), NSMaxY(notch));
+    NSMutableArray *cgColors = [NSMutableArray array];
+    for (int lap = 0; lap < 2; lap++) // twice around, so the whole palette shows at once
+        for (NSColor *c in colors) [cgColors addObject:(__bridge id)c.CGColor];
+    if (colors.count) [cgColors addObject:(__bridge id)colors.firstObject.CGColor];
+    _gradient.colors = cgColors;
+    [CATransaction commit];
+
+    if (fabs(period - _period) > 0.001) {
+        _period = period;
+        if (_shown) [self spin];
+    }
+}
+
+- (void)spin {
+    NSNumber *angle = [_gradient.presentationLayer valueForKeyPath:@"transform.rotation.z"];
+    double from = angle.doubleValue;
+    CABasicAnimation *spin = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+    spin.fromValue = @(from);
+    spin.toValue = @(from - 2 * M_PI);
+    spin.duration = MAX(_period, 0.5);
+    spin.repeatCount = HUGE_VALF;
+    [_gradient addAnimation:spin forKey:@"spin"];
+}
+
+- (void)setShown:(BOOL)shown animated:(BOOL)animated {
+    if (shown == _shown) return;
+    _shown = shown;
+    if (shown) [self spin];
+    float target = shown ? 1 : 0;
+    if (animated) {
+        CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"opacity"];
+        fade.fromValue = @(((CALayer *)_host.presentationLayer ?: _host).opacity);
+        fade.toValue = @(target);
+        fade.duration = shown ? 0.4 : 0.15;
+        [_host addAnimation:fade forKey:@"fade"];
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _host.opacity = target;
+    [CATransaction commit];
+    if (!shown) { // stop spinning once it has faded, so a hidden ring costs nothing
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!self->_shown) [self->_gradient removeAnimationForKey:@"spin"];
+        });
+    }
+}
+
+@end
+
 @interface TodoRowView : FlippedView
 - (instancetype)initWithTodo:(Todo *)todo width:(CGFloat)width toggle:(void (^)(void))toggle remove:(void (^)(void))remove;
 @end
@@ -307,6 +545,158 @@ static CGPathRef CreateNotchPath(CGRect bounds, CGFloat centerX, CGFloat width, 
 
 @end
 
+#pragma mark - Settings window
+
+@interface SettingsWindowController : NSObject <NSWindowDelegate>
+@property (readonly) NSWindow *window;
+- (instancetype)initWithSettings:(RingSettings *)settings;
+- (void)show;
+- (void)refresh;
+@end
+
+@implementation SettingsWindowController {
+    RingSettings *_settings;
+    NSPopUpButton *_palettePopup;
+    NSArray<NSColorWell *> *_wells;
+    NSSlider *_speedSlider;
+    NSTextField *_pauseStatus;
+    NSButton *_pauseButton, *_resumeButton;
+}
+
+- (instancetype)initWithSettings:(RingSettings *)settings {
+    if ((self = [super init])) _settings = settings;
+    return self;
+}
+
+static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight weight, NSColor *color, NSRect frame) {
+    NSTextField *label = [NSTextField wrappingLabelWithString:text];
+    label.font = [NSFont systemFontOfSize:size weight:weight];
+    label.textColor = color;
+    label.frame = frame;
+    return label;
+}
+
+- (void)build {
+    const CGFloat W = 444;
+    _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, W, 364)
+                                          styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                                            backing:NSBackingStoreBuffered
+                                              defer:NO];
+    _window.title = @"NotchTodo Settings";
+    _window.releasedWhenClosed = NO;
+    _window.delegate = self;
+    FlippedView *view = [[FlippedView alloc] initWithFrame:NSMakeRect(0, 0, W, 364)];
+    view.wantsLayer = YES;
+    _window.contentView = view;
+    const CGFloat left = 24, field = 128, width = W - 2 * left;
+
+    [view addSubview:SettingsLabel(@"Notch ring", 13, NSFontWeightSemibold, NSColor.labelColor, NSMakeRect(left, 18, width, 18))];
+    [view addSubview:SettingsLabel(@"While any task is unchecked, a moving color ring surrounds the notch so you can't forget about it.",
+                                   12, NSFontWeightRegular, NSColor.secondaryLabelColor, NSMakeRect(left, 40, width, 32))];
+
+    [view addSubview:SettingsLabel(@"Colors", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, 89, 90, 18))];
+    _palettePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(field, 84, 170, 26) pullsDown:NO];
+    [_palettePopup addItemsWithTitles:PaletteNames()];
+    _palettePopup.target = self;
+    _palettePopup.action = @selector(paletteChanged:);
+    [view addSubview:_palettePopup];
+
+    [view addSubview:SettingsLabel(@"Custom", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, 127, 90, 18))];
+    NSMutableArray *wells = [NSMutableArray array];
+    for (int i = 0; i < 3; i++) {
+        NSColorWell *well = [[NSColorWell alloc] initWithFrame:NSMakeRect(field + 2 + i * 52, 122, 44, 26)];
+        well.colorWellStyle = NSColorWellStyleMinimal;
+        well.target = self;
+        well.action = @selector(customColorChanged:);
+        [view addSubview:well];
+        [wells addObject:well];
+    }
+    _wells = wells;
+    [view addSubview:SettingsLabel(@"Pick any color to switch to Custom.", 11, NSFontWeightRegular, NSColor.tertiaryLabelColor,
+                                   NSMakeRect(field + 2, 152, width - field, 15))];
+
+    [view addSubview:SettingsLabel(@"Speed", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, 187, 90, 18))];
+    _speedSlider = [NSSlider sliderWithValue:0.5 minValue:0 maxValue:1 target:self action:@selector(speedChanged:)];
+    _speedSlider.frame = NSMakeRect(field, 184, width - field + left - 4, 24);
+    _speedSlider.continuous = YES;
+    [view addSubview:_speedSlider];
+    [view addSubview:SettingsLabel(@"Slow", 11, NSFontWeightRegular, NSColor.tertiaryLabelColor, NSMakeRect(field + 2, 208, 60, 15))];
+    NSTextField *fast = SettingsLabel(@"Fast", 11, NSFontWeightRegular, NSColor.tertiaryLabelColor, NSMakeRect(W - left - 60, 208, 60, 15));
+    fast.alignment = NSTextAlignmentRight;
+    [view addSubview:fast];
+
+    NSBox *line = [[NSBox alloc] initWithFrame:NSMakeRect(left, 236, width, 1)];
+    line.boxType = NSBoxSeparator;
+    [view addSubview:line];
+
+    [view addSubview:SettingsLabel(@"Pause", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, 254, 90, 18))];
+    _pauseStatus = SettingsLabel(@"", 13, NSFontWeightRegular, NSColor.secondaryLabelColor, NSMakeRect(field + 2, 254, width - field, 18));
+    [view addSubview:_pauseStatus];
+    _pauseButton = [NSButton buttonWithTitle:@"Pause for 30 Minutes" target:self action:@selector(pauseClicked:)];
+    _pauseButton.frame = NSMakeRect(field - 6, 276, 176, 30);
+    [view addSubview:_pauseButton];
+    _resumeButton = [NSButton buttonWithTitle:@"Resume Now" target:self action:@selector(resumeClicked:)];
+    _resumeButton.frame = NSMakeRect(field + 172, 276, 116, 30);
+    [view addSubview:_resumeButton];
+    [view addSubview:SettingsLabel(@"There's no off switch. A pause always ends after 30 minutes.", 11, NSFontWeightRegular,
+                                   NSColor.tertiaryLabelColor, NSMakeRect(field + 2, 312, W - left - field - 2, 30))];
+}
+
+- (void)show {
+    if (!_window) [self build];
+    [self refresh];
+    [_window center];
+    [NSApp activate];
+    [_window makeKeyAndOrderFront:nil];
+    [_window orderFrontRegardless];
+}
+
+- (void)refresh {
+    if (!_window) return;
+    [_palettePopup selectItemWithTitle:_settings.palette];
+    for (NSUInteger i = 0; i < _wells.count && i < _settings.customColors.count; i++) _wells[i].color = _settings.customColors[i];
+    _speedSlider.doubleValue = _settings.speed;
+    if (_settings.isPaused) {
+        NSString *until = [NSDateFormatter localizedStringFromDate:[NSDate dateWithTimeIntervalSince1970:_settings.pausedUntil]
+                                                         dateStyle:NSDateFormatterNoStyle
+                                                         timeStyle:NSDateFormatterShortStyle];
+        _pauseStatus.stringValue = [NSString stringWithFormat:@"Paused until %@", until];
+        _pauseButton.title = @"Restart 30 Minutes";
+    } else {
+        _pauseStatus.stringValue = @"The ring is on";
+        _pauseButton.title = @"Pause for 30 Minutes";
+    }
+    _resumeButton.enabled = _settings.isPaused;
+}
+
+- (void)paletteChanged:(NSPopUpButton *)sender {
+    _settings.palette = sender.titleOfSelectedItem;
+    [_settings save];
+}
+
+- (void)customColorChanged:(NSColorWell *)sender {
+    NSMutableArray *colors = [NSMutableArray array];
+    for (NSColorWell *well in _wells) [colors addObject:well.color];
+    _settings.customColors = colors;
+    _settings.palette = @"Custom";
+    [_settings save];
+}
+
+- (void)speedChanged:(NSSlider *)sender {
+    _settings.speed = sender.doubleValue;
+    [_settings save];
+}
+
+- (void)pauseClicked:(id)sender { [_settings pause]; }
+- (void)resumeClicked:(id)sender { [_settings resume]; }
+
+- (void)windowWillClose:(NSNotification *)notification {
+    for (NSColorWell *well in _wells) [well deactivate];
+    [NSColorPanel.sharedColorPanel orderOut:nil];
+}
+
+@end
+
 #pragma mark - Controller
 
 @interface NotchController : NSObject <NSApplicationDelegate>
@@ -336,21 +726,34 @@ static CGPathRef CreateNotchPath(CGRect bounds, CGFloat centerX, CGFloat width, 
     BOOL _closeScheduled;
     BOOL _pinned; // `--pin-open` keeps the panel open, for checking the layout without hovering.
     NSString *_snapshotPath; // `--snapshot <png>` opens the panel, saves a picture of it and quits.
+    NSString *_settingsSnapshotPath; // `--snapshot-settings <png>` does the same for the Settings window.
+    RingSettings *_ring;
+    RingView *_ringView;
+    SettingsWindowController *_settingsWindow;
+    NSTimer *_ringTimer;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     NSArray<NSString *> *args = NSProcessInfo.processInfo.arguments;
     NSUInteger snapshotIndex = [args indexOfObject:@"--snapshot"];
     if (snapshotIndex != NSNotFound && snapshotIndex + 1 < args.count) _snapshotPath = args[snapshotIndex + 1];
-    _pinned = _snapshotPath || [args containsObject:@"--pin-open"];
+    // `--snapshot <png> --closed` pictures the closed notch (with its ring) instead of the open panel.
+    _pinned = (_snapshotPath && ![args containsObject:@"--closed"]) || [args containsObject:@"--pin-open"];
+    NSUInteger settingsIndex = [args indexOfObject:@"--snapshot-settings"];
+    if (settingsIndex != NSNotFound && settingsIndex + 1 < args.count) _settingsSnapshotPath = args[settingsIndex + 1];
     _store = [TodoStore new];
     __weak NotchController *weakSelf = self;
     _store.onChange = ^{ [weakSelf storeChanged]; };
+    _ring = [RingSettings new];
+    _ring.onChange = ^{ [weakSelf ringSettingsChanged]; };
 
     [self buildViews];
     [self rebuildList];
     [self layoutForScreen];
     [_panel orderFrontRegardless];
+    [self ringSettingsChanged];
+    // Catches the end of a pause even if the Mac slept through it.
+    _ringTimer = [NSTimer scheduledTimerWithTimeInterval:15 target:self selector:@selector(ringTick) userInfo:nil repeats:YES];
 
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(layoutForScreen)
                                                name:NSApplicationDidChangeScreenParametersNotification object:nil];
@@ -380,6 +783,38 @@ static CGPathRef CreateNotchPath(CGRect bounds, CGFloat centerX, CGFloat width, 
             [NSApp terminate:nil];
         });
     }
+    if (_settingsSnapshotPath) {
+        [self showSettings:nil];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self writeSettingsSnapshot];
+            [NSApp terminate:nil];
+        });
+    }
+}
+
+- (void)writeSettingsSnapshot {
+    NSView *view = _settingsWindow.window.contentView;
+    NSRect bounds = view.bounds;
+    CGFloat scale = _settingsWindow.window.backingScaleFactor;
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL
+        pixelsWide:(NSInteger)(NSWidth(bounds) * scale) pixelsHigh:(NSInteger)(NSHeight(bounds) * scale)
+        bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace
+        bytesPerRow:0 bitsPerPixel:0];
+    NSGraphicsContext *context = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
+    CGContextScaleCTM(context.CGContext, scale, scale);
+    [NSGraphicsContext saveGraphicsState];
+    NSGraphicsContext.currentContext = context;
+    [view.effectiveAppearance performAsCurrentDrawingAppearance:^{
+        [NSColor.windowBackgroundColor setFill];
+        NSRectFill(bounds);
+    }];
+    [NSGraphicsContext restoreGraphicsState];
+    // Flipped content view: flip the context so the layer tree draws upright.
+    CGContextTranslateCTM(context.CGContext, 0, NSHeight(bounds));
+    CGContextScaleCTM(context.CGContext, 1, -1);
+    [view displayIfNeeded];
+    [view.layer renderInContext:context.CGContext];
+    [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:_settingsSnapshotPath atomically:YES];
 }
 
 - (void)writeSnapshot {
@@ -410,6 +845,10 @@ static CGPathRef CreateNotchPath(CGRect bounds, CGFloat centerX, CGFloat width, 
         if (strongSelf && !NSPointInRect(NSEvent.mouseLocation, [strongSelf openRect])) [strongSelf closeForce:NO];
     };
     _panel.contentView = _container;
+
+    _ringView = [[RingView alloc] initWithFrame:_container.bounds];
+    _ringView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [_container addSubview:_ringView];
 
     _shapeView = [[ShapeView alloc] initWithFrame:_container.bounds];
     _shapeView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -508,6 +947,7 @@ static CGPathRef CreateNotchPath(CGRect bounds, CGFloat centerX, CGFloat width, 
     [self updatePanelFrame];
     [self layoutContent];
     [self setShapeOpen:_isOpen animated:NO];
+    [self updateRingAnimated:!_snapshotPath];
 }
 
 // The panel is sized to the open panel plus room for its shadow, pinned to the top of the screen.
@@ -578,6 +1018,34 @@ static CGPathRef CreateNotchPath(CGRect bounds, CGFloat centerX, CGFloat width, 
     [self updatePanelFrame];
     [self layoutContent];
     if (_isOpen) [self setShapeOpen:YES animated:NO];
+    [self updateRingAnimated:YES];
+}
+
+#pragma mark Ring
+
+// Shown while any task is unchecked, the panel is closed and the ring isn't paused.
+- (void)updateRingAnimated:(BOOL)animated {
+    if (!_ringView || !_ring) return;
+    CGFloat w = NSWidth(_notchRect), h = NSHeight(_notchRect);
+    NSRect notch = NSMakeRect([self notchCenterInPanel] - w / 2, NSHeight(_container.bounds) - h, w, h);
+    [_ringView setNotchRect:notch colors:_ring.colors period:_ring.period];
+    BOOL shown = _hasNotch && _store.openCount > 0 && !_ring.isPaused && !_isOpen;
+    [_ringView setShown:shown animated:animated];
+}
+
+- (void)ringSettingsChanged {
+    [self updateRingAnimated:!_snapshotPath];
+    [_settingsWindow refresh];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(ringTick) object:nil];
+    if (_ring.isPaused) {
+        NSTimeInterval left = _ring.pausedUntil - NSDate.date.timeIntervalSince1970;
+        [self performSelector:@selector(ringTick) withObject:nil afterDelay:left + 0.5];
+    }
+}
+
+- (void)ringTick {
+    [self updateRingAnimated:YES];
+    [_settingsWindow refresh];
 }
 
 #pragma mark Open / close
@@ -627,6 +1095,7 @@ static CGPathRef CreateNotchPath(CGRect bounds, CGFloat centerX, CGFloat width, 
     _isOpen = YES;
     _panel.ignoresMouseEvents = NO;
     [self setShapeOpen:YES animated:YES];
+    [self updateRingAnimated:YES];
 
     _content.hidden = NO;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -652,6 +1121,7 @@ static CGPathRef CreateNotchPath(CGRect bounds, CGFloat centerX, CGFloat width, 
         if (!self->_isOpen) self->_content.hidden = YES;
     }];
     [self setShapeOpen:NO animated:YES];
+    [self updateRingAnimated:YES];
 
     // If you were typing in the panel, hand the keyboard back to the app you were using.
     if (_panel.isKeyWindow) {
@@ -703,6 +1173,11 @@ static CGPathRef CreateNotchPath(CGRect bounds, CGFloat centerX, CGFloat width, 
     NSMenuItem *clear = [menu addItemWithTitle:@"Clear Completed" action:@selector(clearCompleted:) keyEquivalent:@""];
     clear.target = self;
     clear.enabled = _store.hasDone;
+    NSMenuItem *pause = [menu addItemWithTitle:(_ring.isPaused ? @"Resume Ring Now" : @"Pause Ring for 30 Minutes")
+                                        action:@selector(togglePause:) keyEquivalent:@""];
+    pause.target = self;
+    NSMenuItem *settings = [menu addItemWithTitle:@"Settings…" action:@selector(showSettings:) keyEquivalent:@""];
+    settings.target = self;
     NSMenuItem *login = [menu addItemWithTitle:@"Open at Login" action:@selector(toggleLogin:) keyEquivalent:@""];
     login.target = self;
     login.state = SMAppService.mainAppService.status == SMAppServiceStatusEnabled ? NSControlStateValueOn : NSControlStateValueOff;
@@ -717,6 +1192,20 @@ static CGPathRef CreateNotchPath(CGRect bounds, CGFloat centerX, CGFloat width, 
 }
 
 - (void)clearCompleted:(id)sender { [_store clearDone]; }
+
+- (void)togglePause:(id)sender {
+    if (_ring.isPaused) [_ring resume];
+    else [_ring pause];
+}
+
+- (void)showSettings:(id)sender {
+    // Menu actions fire while the menu is still tracking, so wait a beat before closing the panel.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self closeForce:YES];
+        if (!self->_settingsWindow) self->_settingsWindow = [[SettingsWindowController alloc] initWithSettings:self->_ring];
+        [self->_settingsWindow show];
+    });
+}
 
 - (void)toggleLogin:(id)sender {
     SMAppService *service = SMAppService.mainAppService;

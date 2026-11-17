@@ -4,11 +4,18 @@ A tiny todo list that lives in your MacBook's notch. Hover the notch and it drop
 
 ![NotchTodo open under the notch](docs/screenshot.png)
 
+With tasks left, a color ring moves around the closed notch:
+
+![The color ring around the notch](docs/ring.png)
+
 ## Features
 
 - Hover the notch to open it. Move the mouse away, press Esc, or click anywhere else to close it.
 - Type a task and press Return to add it. Click a task to check it off; click × to delete it.
 - Finished tasks sink to the bottom. Clear them from the ⋯ menu.
+- While any task is unchecked, a moving color ring surrounds the notch so you can't forget about it. It disappears once everything is checked off.
+- Pick the ring's colors (Rainbow, Sunset, Ocean, Aurora, Candy or your own three) and its speed in ⋯ → Settings….
+- You can pause the ring for 30 minutes at a time, but there's no off switch: a pause always ends on its own.
 - Open at Login toggle in the ⋯ menu.
 - Tasks are stored locally as JSON in `~/Library/Application Support/NotchTodo/todos.json`. No account, no network.
 - On a Mac without a notch, the middle of the menu bar acts as the hover zone.
@@ -53,7 +60,8 @@ cd notch-todo
 
 - `NOTCHTODO_FILE=/path/to/todos.json` stores tasks somewhere else.
 - `--pin-open` keeps the panel open without hovering.
-- `--snapshot out.png` opens the panel, saves a picture of it, and quits.
+- `--snapshot out.png` opens the panel, saves a picture of it, and quits. Add `--closed` to picture the closed notch and its ring instead.
+- `--snapshot-settings out.png` does the same for the Settings window.
 
 ## Credits
 
