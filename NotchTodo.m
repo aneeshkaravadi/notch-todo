@@ -49,18 +49,20 @@ static CGPathRef CreateNotchPath(CGRect bounds, CGFloat centerX, CGFloat width, 
     return p;
 }
 
-// The notch outline grown by `gap` on every side, open at the top so it runs into the screen edge.
+// The notch outline grown by `gap` on every side: down the left side, along the bottom and up
+// the right side, with the ends flaring outward into the top edge of the screen. The sides sit
+// outside the notch's full width, since the camera housing covers everything inside it.
 static CGPathRef CreateRingPath(CGRect notch, CGFloat gap) {
     const CGFloat flare = 6, radius = 10 + gap; // close to the physical notch's own corners
     CGFloat top = CGRectGetMaxY(notch), bottom = CGRectGetMinY(notch) - gap;
     CGFloat left = CGRectGetMinX(notch) - gap, right = CGRectGetMaxX(notch) + gap;
     CGMutablePathRef p = CGPathCreateMutable();
-    CGPathMoveToPoint(p, NULL, left - 2, top + 1);
-    CGPathAddQuadCurveToPoint(p, NULL, left + flare, top, left + flare, top - flare);
-    CGPathAddArcToPoint(p, NULL, left + flare, bottom, left + flare + radius, bottom, radius);
-    CGPathAddArcToPoint(p, NULL, right - flare, bottom, right - flare, bottom + radius, radius);
-    CGPathAddLineToPoint(p, NULL, right - flare, top - flare);
-    CGPathAddQuadCurveToPoint(p, NULL, right - flare, top, right + 2, top + 1);
+    CGPathMoveToPoint(p, NULL, left - flare - 2, top + 1);
+    CGPathAddQuadCurveToPoint(p, NULL, left, top, left, top - flare);
+    CGPathAddArcToPoint(p, NULL, left, bottom, left + radius, bottom, radius);
+    CGPathAddArcToPoint(p, NULL, right, bottom, right, bottom + radius, radius);
+    CGPathAddLineToPoint(p, NULL, right, top - flare);
+    CGPathAddQuadCurveToPoint(p, NULL, right, top, right + flare + 2, top + 1);
     return p;
 }
 
@@ -106,6 +108,8 @@ static NSString *HexFromColor(NSColor *color) {
 @property (nonatomic, copy) NSString *palette;
 @property (nonatomic, copy) NSArray<NSColor *> *customColors;
 @property (nonatomic) double speed;              // 0 = slow, 1 = fast
+@property (nonatomic) double saturation;         // 0 = gray, 1 = most vivid
+@property (nonatomic) double brightness;         // 0 = dim, 1 = brightest
 @property (nonatomic) NSTimeInterval pausedUntil; // seconds since 1970; 0 when running
 @property (nonatomic, copy) void (^onChange)(void);
 @property (nonatomic, readonly) NSArray<NSColor *> *colors;
@@ -129,16 +133,35 @@ static NSString *HexFromColor(NSColor *color) {
         for (id hex in hexes) [custom addObject:ColorFromHex([hex isKindOfClass:NSString.class] ? hex : @"FFFFFF")];
         _customColors = custom;
         _speed = [d objectForKey:@"RingSpeed"] ? MAX(0, MIN(1, [d doubleForKey:@"RingSpeed"])) : 0.5;
+        _saturation = [d objectForKey:@"RingSaturation"] ? MAX(0, MIN(1, [d doubleForKey:@"RingSaturation"])) : 0.8;
+        _brightness = [d objectForKey:@"RingBrightness"] ? MAX(0, MIN(1, [d doubleForKey:@"RingBrightness"])) : 0.85;
         // Never honor a pause longer than 30 minutes, even if the saved value says otherwise.
         _pausedUntil = MIN([d doubleForKey:@"RingPausedUntil"], NSDate.date.timeIntervalSince1970 + kPauseLength);
     }
     return self;
 }
 
-- (NSArray<NSColor *> *)colors {
+- (NSArray<NSColor *> *)baseColors {
     if ([_palette isEqual:@"Custom"]) return _customColors;
     NSMutableArray *colors = [NSMutableArray array];
     for (NSString *hex in PaletteHexes(_palette)) [colors addObject:ColorFromHex(hex)];
+    return colors;
+}
+
+// The palette with saturation and brightness applied. The work happens in Display P3, so on a
+// MacBook screen the top of the saturation slider reaches colors more vivid than plain sRGB.
+- (NSArray<NSColor *> *)colors {
+    NSColorSpace *p3 = NSColorSpace.displayP3ColorSpace;
+    double satFactor = 1.6 * _saturation;          // 0.625 leaves the palette as designed
+    double brightFactor = 0.35 + 0.9 * _brightness; // ~0.72 leaves it as designed
+    NSMutableArray *colors = [NSMutableArray array];
+    for (NSColor *base in [self baseColors]) {
+        NSColor *wide = [base colorUsingColorSpace:p3] ?: base;
+        CGFloat h = 0, sat = 0, b = 0, a = 1;
+        [wide getHue:&h saturation:&sat brightness:&b alpha:&a];
+        [colors addObject:[NSColor colorWithColorSpace:p3 hue:h saturation:MIN(1, sat * satFactor)
+                                            brightness:MIN(1, b * brightFactor) alpha:1]];
+    }
     return colors;
 }
 
@@ -163,6 +186,8 @@ static NSString *HexFromColor(NSColor *color) {
     for (NSColor *c in _customColors) [hexes addObject:HexFromColor(c)];
     [d setObject:hexes forKey:@"RingCustomColors"];
     [d setDouble:_speed forKey:@"RingSpeed"];
+    [d setDouble:_saturation forKey:@"RingSaturation"];
+    [d setDouble:_brightness forKey:@"RingBrightness"];
     [d setDouble:_pausedUntil forKey:@"RingPausedUntil"];
     if (self.onChange) self.onChange();
 }
@@ -357,7 +382,8 @@ static NSString *HexFromColor(NSColor *color) {
 // A glowing ring hugging the notch. A conic gradient spins behind a ring-shaped mask, so the
 // colors travel around the notch without redrawing anything.
 @interface RingView : NSView
-- (void)setNotchRect:(NSRect)notch colors:(NSArray<NSColor *> *)colors period:(NSTimeInterval)period;
+- (void)setNotchRect:(NSRect)notch colors:(NSArray<NSColor *> *)colors period:(NSTimeInterval)period
+           intensity:(double)intensity;
 - (void)setShown:(BOOL)shown animated:(BOOL)animated;
 @end
 
@@ -395,7 +421,7 @@ static NSString *HexFromColor(NSColor *color) {
         _core = [CAShapeLayer layer];
         _core.fillColor = nil;
         _core.strokeColor = NSColor.whiteColor.CGColor;
-        _core.lineWidth = 2.5;
+        _core.lineWidth = 3;
         _core.lineJoin = kCALineJoinRound;
         [_mask addSublayer:_glow];
         [_mask addSublayer:_core];
@@ -407,14 +433,19 @@ static NSString *HexFromColor(NSColor *color) {
 
 - (NSView *)hitTest:(NSPoint)point { return nil; }
 
-- (void)setNotchRect:(NSRect)notch colors:(NSArray<NSColor *> *)colors period:(NSTimeInterval)period {
+- (void)setNotchRect:(NSRect)notch colors:(NSArray<NSColor *> *)colors period:(NSTimeInterval)period
+           intensity:(double)intensity {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _host.frame = self.bounds;
     _mask.frame = _host.bounds;
     _glow.frame = _mask.bounds;
     _core.frame = _mask.bounds;
-    CGPathRef path = CreateRingPath(notch, 3);
+    // Brighter also means a stronger halo around the core line.
+    _glow.strokeColor = [NSColor colorWithWhite:1 alpha:0.15 + 0.5 * intensity].CGColor;
+    _glow.shadowOpacity = 0.4 + 0.6 * intensity;
+    _core.strokeColor = [NSColor colorWithWhite:1 alpha:0.6 + 0.4 * intensity].CGColor;
+    CGPathRef path = CreateRingPath(notch, 4);
     _glow.path = path;
     _core.path = path;
     CGPathRelease(path);
@@ -558,7 +589,7 @@ static NSString *HexFromColor(NSColor *color) {
     RingSettings *_settings;
     NSPopUpButton *_palettePopup;
     NSArray<NSColorWell *> *_wells;
-    NSSlider *_speedSlider;
+    NSSlider *_speedSlider, *_saturationSlider, *_brightnessSlider;
     NSTextField *_pauseStatus;
     NSButton *_pauseButton, *_resumeButton;
 }
@@ -578,14 +609,14 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
 
 - (void)build {
     const CGFloat W = 444;
-    _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, W, 364)
+    _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, W, 476)
                                           styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                             backing:NSBackingStoreBuffered
                                               defer:NO];
     _window.title = @"NotchTodo Settings";
     _window.releasedWhenClosed = NO;
     _window.delegate = self;
-    FlippedView *view = [[FlippedView alloc] initWithFrame:NSMakeRect(0, 0, W, 364)];
+    FlippedView *view = [[FlippedView alloc] initWithFrame:NSMakeRect(0, 0, W, 476)];
     view.wantsLayer = YES;
     _window.contentView = view;
     const CGFloat left = 24, field = 128, width = W - 2 * left;
@@ -625,21 +656,38 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
     fast.alignment = NSTextAlignmentRight;
     [view addSubview:fast];
 
-    NSBox *line = [[NSBox alloc] initWithFrame:NSMakeRect(left, 236, width, 1)];
+    _saturationSlider = [self sliderRow:@"Saturation" low:@"Muted" high:@"Vivid" y:240 action:@selector(saturationChanged:) in:view];
+    _brightnessSlider = [self sliderRow:@"Brightness" low:@"Dim" high:@"Bright" y:296 action:@selector(brightnessChanged:) in:view];
+
+    NSBox *line = [[NSBox alloc] initWithFrame:NSMakeRect(left, 348, width, 1)];
     line.boxType = NSBoxSeparator;
     [view addSubview:line];
 
-    [view addSubview:SettingsLabel(@"Pause", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, 254, 90, 18))];
-    _pauseStatus = SettingsLabel(@"", 13, NSFontWeightRegular, NSColor.secondaryLabelColor, NSMakeRect(field + 2, 254, width - field, 18));
+    [view addSubview:SettingsLabel(@"Pause", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, 366, 90, 18))];
+    _pauseStatus = SettingsLabel(@"", 13, NSFontWeightRegular, NSColor.secondaryLabelColor, NSMakeRect(field + 2, 366, width - field, 18));
     [view addSubview:_pauseStatus];
     _pauseButton = [NSButton buttonWithTitle:@"Pause for 30 Minutes" target:self action:@selector(pauseClicked:)];
-    _pauseButton.frame = NSMakeRect(field - 6, 276, 176, 30);
+    _pauseButton.frame = NSMakeRect(field - 6, 388, 176, 30);
     [view addSubview:_pauseButton];
     _resumeButton = [NSButton buttonWithTitle:@"Resume Now" target:self action:@selector(resumeClicked:)];
-    _resumeButton.frame = NSMakeRect(field + 172, 276, 116, 30);
+    _resumeButton.frame = NSMakeRect(field + 172, 388, 116, 30);
     [view addSubview:_resumeButton];
     [view addSubview:SettingsLabel(@"There's no off switch. A pause always ends after 30 minutes.", 11, NSFontWeightRegular,
-                                   NSColor.tertiaryLabelColor, NSMakeRect(field + 2, 312, W - left - field - 2, 30))];
+                                   NSColor.tertiaryLabelColor, NSMakeRect(field + 2, 424, W - left - field - 2, 30))];
+}
+
+- (NSSlider *)sliderRow:(NSString *)title low:(NSString *)low high:(NSString *)high y:(CGFloat)y action:(SEL)action in:(NSView *)view {
+    const CGFloat W = NSWidth(view.bounds), left = 24, field = 128, width = W - 2 * left;
+    [view addSubview:SettingsLabel(title, 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, y + 3, 100, 18))];
+    NSSlider *slider = [NSSlider sliderWithValue:0.5 minValue:0 maxValue:1 target:self action:action];
+    slider.frame = NSMakeRect(field, y, width - field + left - 4, 24);
+    slider.continuous = YES;
+    [view addSubview:slider];
+    [view addSubview:SettingsLabel(low, 11, NSFontWeightRegular, NSColor.tertiaryLabelColor, NSMakeRect(field + 2, y + 24, 80, 15))];
+    NSTextField *highLabel = SettingsLabel(high, 11, NSFontWeightRegular, NSColor.tertiaryLabelColor, NSMakeRect(W - left - 80, y + 24, 80, 15));
+    highLabel.alignment = NSTextAlignmentRight;
+    [view addSubview:highLabel];
+    return slider;
 }
 
 - (void)show {
@@ -656,6 +704,8 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
     [_palettePopup selectItemWithTitle:_settings.palette];
     for (NSUInteger i = 0; i < _wells.count && i < _settings.customColors.count; i++) _wells[i].color = _settings.customColors[i];
     _speedSlider.doubleValue = _settings.speed;
+    _saturationSlider.doubleValue = _settings.saturation;
+    _brightnessSlider.doubleValue = _settings.brightness;
     if (_settings.isPaused) {
         NSString *until = [NSDateFormatter localizedStringFromDate:[NSDate dateWithTimeIntervalSince1970:_settings.pausedUntil]
                                                          dateStyle:NSDateFormatterNoStyle
@@ -684,6 +734,16 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
 
 - (void)speedChanged:(NSSlider *)sender {
     _settings.speed = sender.doubleValue;
+    [_settings save];
+}
+
+- (void)saturationChanged:(NSSlider *)sender {
+    _settings.saturation = sender.doubleValue;
+    [_settings save];
+}
+
+- (void)brightnessChanged:(NSSlider *)sender {
+    _settings.brightness = sender.doubleValue;
     [_settings save];
 }
 
@@ -828,6 +888,15 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
     CGContextScaleCTM(context, scale, scale);
     CGContextSetRGBFillColor(context, 0.45, 0.5, 0.58, 1); // stand-in for a wallpaper
     CGContextFillRect(context, bounds);
+    if (_hasNotch) { // stand-in for the camera housing: the full notch rect with rounded bottom corners
+        CGFloat w = NSWidth(_notchRect), h = NSHeight(_notchRect);
+        CGRect hardware = CGRectMake([self notchCenterInPanel] - w / 2, NSHeight(bounds) - h, w, h + 12);
+        CGPathRef housing = CGPathCreateWithRoundedRect(hardware, 9, 9, NULL);
+        CGContextSetRGBFillColor(context, 0, 0, 0, 1);
+        CGContextAddPath(context, housing);
+        CGContextFillPath(context);
+        CGPathRelease(housing);
+    }
     [_container displayIfNeeded];
     [_container.layer renderInContext:context];
     [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:_snapshotPath atomically:YES];
@@ -1028,7 +1097,7 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
     if (!_ringView || !_ring) return;
     CGFloat w = NSWidth(_notchRect), h = NSHeight(_notchRect);
     NSRect notch = NSMakeRect([self notchCenterInPanel] - w / 2, NSHeight(_container.bounds) - h, w, h);
-    [_ringView setNotchRect:notch colors:_ring.colors period:_ring.period];
+    [_ringView setNotchRect:notch colors:_ring.colors period:_ring.period intensity:_ring.brightness];
     BOOL shown = _hasNotch && _store.openCount > 0 && !_ring.isPaused && !_isOpen;
     [_ringView setShown:shown animated:animated];
 }
