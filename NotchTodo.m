@@ -136,6 +136,9 @@ static NSString *HexFromColor(NSColor *color) {
 @property (nonatomic) double saturation;         // 0 = gray, 1 = most vivid
 @property (nonatomic) double brightness;         // 0 = dim, 1 = brightest
 @property (nonatomic) BOOL wholeScreen;          // border the whole screen instead of just the notch
+@property (nonatomic) BOOL flash;                // flash at random times instead of staying on
+@property (nonatomic) double flashMin, flashMax; // seconds between flashes
+@property (nonatomic, readonly) NSTimeInterval nextFlashDelay; // random, between flashMin and flashMax
 @property (nonatomic) NSTimeInterval pausedUntil; // seconds since 1970; 0 when running
 @property (nonatomic, copy) void (^onChange)(void);
 @property (nonatomic, readonly) NSArray<NSColor *> *colors;
@@ -162,6 +165,10 @@ static NSString *HexFromColor(NSColor *color) {
         _saturation = [d objectForKey:@"RingSaturation"] ? MAX(0, MIN(1, [d doubleForKey:@"RingSaturation"])) : 0.8;
         _brightness = [d objectForKey:@"RingBrightness"] ? MAX(0, MIN(1, [d doubleForKey:@"RingBrightness"])) : 0.85;
         _wholeScreen = [d boolForKey:@"RingWholeScreen"];
+        _flash = [d boolForKey:@"RingFlash"];
+        _flashMin = [d objectForKey:@"RingFlashMin"] ? [d doubleForKey:@"RingFlashMin"] : 20;
+        _flashMax = [d objectForKey:@"RingFlashMax"] ? [d doubleForKey:@"RingFlashMax"] : 60;
+        [self clampFlash];
         // Never honor a pause longer than 30 minutes, even if the saved value says otherwise.
         _pausedUntil = MIN([d doubleForKey:@"RingPausedUntil"], NSDate.date.timeIntervalSince1970 + kPauseLength);
     }
@@ -194,6 +201,16 @@ static NSString *HexFromColor(NSColor *color) {
 
 - (NSTimeInterval)period { return 14.0 * pow(1.2 / 14.0, _speed); }
 
+// 2 seconds to an hour, and the longest gap never shorter than the shortest.
+- (void)clampFlash {
+    _flashMin = round(MAX(2, MIN(3600, _flashMin)));
+    _flashMax = round(MAX(_flashMin, MIN(3600, _flashMax)));
+}
+
+- (NSTimeInterval)nextFlashDelay {
+    return _flashMin + (_flashMax - _flashMin) * (arc4random_uniform(10001) / 10000.0);
+}
+
 - (BOOL)isPaused { return _pausedUntil > NSDate.date.timeIntervalSince1970; }
 
 - (void)pause {
@@ -216,6 +233,10 @@ static NSString *HexFromColor(NSColor *color) {
     [d setDouble:_saturation forKey:@"RingSaturation"];
     [d setDouble:_brightness forKey:@"RingBrightness"];
     [d setBool:_wholeScreen forKey:@"RingWholeScreen"];
+    [self clampFlash];
+    [d setBool:_flash forKey:@"RingFlash"];
+    [d setDouble:_flashMin forKey:@"RingFlashMin"];
+    [d setDouble:_flashMax forKey:@"RingFlashMax"];
     [d setDouble:_pausedUntil forKey:@"RingPausedUntil"];
     if (self.onChange) self.onChange();
 }
@@ -413,6 +434,7 @@ static NSString *HexFromColor(NSColor *color) {
 @interface RingView : NSView
 @property (nonatomic) float maxFrameRate;            // 0 = the display's own rate
 @property (nonatomic, copy) void (^onHidden)(void);  // runs once a fade-out finishes
+@property (nonatomic) NSTimeInterval fadeInDuration;
 - (instancetype)initWithFrame:(NSRect)frame coreWidth:(CGFloat)core glowWidth:(CGFloat)glow;
 - (void)setPath:(CGPathRef)path spinCenter:(CGPoint)center spinRadius:(CGFloat)radius
          colors:(NSArray<NSColor *> *)colors period:(NSTimeInterval)period intensity:(double)intensity;
@@ -431,6 +453,7 @@ static NSString *HexFromColor(NSColor *color) {
 - (instancetype)initWithFrame:(NSRect)frame coreWidth:(CGFloat)core glowWidth:(CGFloat)glow {
     if ((self = [super initWithFrame:frame])) {
         self.wantsLayer = YES;
+        _fadeInDuration = 0.4;
         _host = [CALayer layer];
         _host.opacity = 0;
 
@@ -513,7 +536,7 @@ static NSString *HexFromColor(NSColor *color) {
         CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"opacity"];
         fade.fromValue = @(((CALayer *)_host.presentationLayer ?: _host).opacity);
         fade.toValue = @(target);
-        fade.duration = shown ? 0.4 : 0.15;
+        fade.duration = shown ? _fadeInDuration : 0.15;
         [_host addAnimation:fade forKey:@"fade"];
     }
     [CATransaction begin];
@@ -646,7 +669,8 @@ static NSString *HexFromColor(NSColor *color) {
 
 @implementation SettingsWindowController {
     RingSettings *_settings;
-    NSPopUpButton *_palettePopup, *_placePopup;
+    NSPopUpButton *_palettePopup, *_placePopup, *_stylePopup;
+    NSTextField *_flashMinField, *_flashMaxField;
     NSArray<NSColorWell *> *_wells;
     NSSlider *_speedSlider, *_saturationSlider, *_brightnessSlider;
     NSTextField *_pauseStatus;
@@ -667,7 +691,7 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
 }
 
 - (void)build {
-    const CGFloat W = 444, H = 516;
+    const CGFloat W = 444, H = 592;
     _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, W, H)
                                           styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                             backing:NSBackingStoreBuffered
@@ -691,6 +715,22 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
     _placePopup.target = self;
     _placePopup.action = @selector(placeChanged:);
     [view addSubview:_placePopup];
+    y += 38;
+
+    [view addSubview:SettingsLabel(@"Style", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, y + 5, 100, 18))];
+    _stylePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(field, y, 200, 26) pullsDown:NO];
+    [_stylePopup addItemsWithTitles:@[@"Always on", @"Flash at random times"]];
+    _stylePopup.target = self;
+    _stylePopup.action = @selector(styleChanged:);
+    [view addSubview:_stylePopup];
+    y += 38;
+
+    [view addSubview:SettingsLabel(@"Flash every", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, y + 4, 100, 18))];
+    _flashMinField = [self secondsField:NSMakeRect(field + 2, y, 56, 24) in:view];
+    [view addSubview:SettingsLabel(@"to", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(field + 66, y + 4, 20, 18))];
+    _flashMaxField = [self secondsField:NSMakeRect(field + 88, y, 56, 24) in:view];
+    [view addSubview:SettingsLabel(@"seconds, at random", 13, NSFontWeightRegular, NSColor.secondaryLabelColor,
+                                   NSMakeRect(field + 152, y + 4, 140, 18))];
     y += 38;
 
     [view addSubview:SettingsLabel(@"Colors", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, y + 5, 100, 18))];
@@ -741,6 +781,21 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
                                    NSColor.tertiaryLabelColor, NSMakeRect(field + 2, y + 58, W - left - field - 2, 30))];
 }
 
+- (NSTextField *)secondsField:(NSRect)frame in:(NSView *)view {
+    NSTextField *field = [NSTextField textFieldWithString:@""];
+    field.frame = frame;
+    field.alignment = NSTextAlignmentRight;
+    NSNumberFormatter *formatter = [NSNumberFormatter new];
+    formatter.numberStyle = NSNumberFormatterNoStyle;
+    formatter.allowsFloats = NO;
+    field.formatter = formatter;
+    field.target = self;
+    field.action = @selector(flashIntervalChanged:);
+    field.cell.sendsActionOnEndEditing = YES;
+    [view addSubview:field];
+    return field;
+}
+
 - (NSSlider *)sliderRow:(NSString *)title low:(NSString *)low high:(NSString *)high y:(CGFloat)y action:(SEL)action in:(NSView *)view {
     const CGFloat W = NSWidth(view.bounds), left = 24, field = 128, width = W - 2 * left;
     [view addSubview:SettingsLabel(title, 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, y + 3, 100, 18))];
@@ -762,11 +817,17 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
     [NSApp activate];
     [_window makeKeyAndOrderFront:nil];
     [_window orderFrontRegardless];
+    [_window makeFirstResponder:nil]; // don't start with a cursor in the first number field
 }
 
 - (void)refresh {
     if (!_window) return;
     [_placePopup selectItemAtIndex:_settings.wholeScreen ? 1 : 0];
+    [_stylePopup selectItemAtIndex:_settings.flash ? 1 : 0];
+    // Don't overwrite a number while you're typing it.
+    if (!_flashMinField.currentEditor) _flashMinField.integerValue = (NSInteger)_settings.flashMin;
+    if (!_flashMaxField.currentEditor) _flashMaxField.integerValue = (NSInteger)_settings.flashMax;
+    _flashMinField.enabled = _flashMaxField.enabled = _settings.flash;
     [_palettePopup selectItemWithTitle:_settings.palette];
     for (NSUInteger i = 0; i < _wells.count && i < _settings.customColors.count; i++) _wells[i].color = _settings.customColors[i];
     _speedSlider.doubleValue = _settings.speed;
@@ -788,6 +849,19 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
 - (void)placeChanged:(NSPopUpButton *)sender {
     _settings.wholeScreen = sender.indexOfSelectedItem == 1;
     [_settings save];
+}
+
+- (void)styleChanged:(NSPopUpButton *)sender {
+    _settings.flash = sender.indexOfSelectedItem == 1;
+    [_settings save];
+}
+
+- (void)flashIntervalChanged:(id)sender {
+    _settings.flashMin = _flashMinField.doubleValue;
+    _settings.flashMax = _flashMaxField.doubleValue;
+    [_settings save]; // clamps to 2-3600 s and keeps the longest gap at least the shortest
+    if (!_flashMinField.currentEditor) _flashMinField.integerValue = (NSInteger)_settings.flashMin;
+    if (!_flashMaxField.currentEditor) _flashMaxField.integerValue = (NSInteger)_settings.flashMax;
 }
 
 - (void)paletteChanged:(NSPopUpButton *)sender {
@@ -865,6 +939,10 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
     OverlayPanel *_overlay;  // click-through window for the whole-screen border
     RingView *_screenRing;
     NSString *_screenSnapshotPath; // `--snapshot-screen <png>` pictures the whole-screen border.
+    // Flash style: the colors stay hidden and blink at random times.
+    NSUInteger _flashGeneration; // bumping it cancels any scheduled or running flash
+    BOOL _flashScheduled, _flashOn, _logFlashes;
+    NSString *_flashKey;         // the flash settings last applied, to notice changes
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
@@ -873,6 +951,7 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
     if (snapshotIndex != NSNotFound && snapshotIndex + 1 < args.count) _snapshotPath = args[snapshotIndex + 1];
     // `--snapshot <png> --closed` pictures the closed notch (with its ring) instead of the open panel.
     _pinned = (_snapshotPath && ![args containsObject:@"--closed"]) || [args containsObject:@"--pin-open"];
+    _logFlashes = [args containsObject:@"--log-flashes"]; // `--log-flashes` logs when each flash happens
     NSUInteger screenIndex = [args indexOfObject:@"--snapshot-screen"];
     if (screenIndex != NSNotFound && screenIndex + 1 < args.count) _screenSnapshotPath = args[screenIndex + 1];
     NSUInteger settingsIndex = [args indexOfObject:@"--snapshot-settings"];
@@ -1210,7 +1289,10 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
 - (void)updateRingAnimated:(BOOL)animated {
     if (!_ringView || !_ring) return;
     BOOL wanted = _store.openCount > 0 && !_ring.isPaused;
+    [self keepFlashScheduled:wanted];
+    BOOL lit = wanted && (!_ring.flash || _flashOn); // in flash style, only during a flash
     NSArray<NSColor *> *colors = _ring.colors;
+    _ringView.fadeInDuration = _screenRing.fadeInDuration = _ring.flash ? 0.08 : 0.4;
 
     // Around the notch only, hidden while the panel is open (the panel covers the notch anyway).
     CGFloat w = NSWidth(_notchRect), h = NSHeight(_notchRect);
@@ -1219,10 +1301,10 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
     [_ringView setPath:notchPath spinCenter:CGPointMake(NSMidX(notch), NSMaxY(notch)) spinRadius:hypot(w / 2 + 24, h + 24)
                 colors:colors period:_ring.period intensity:_ring.brightness];
     CGPathRelease(notchPath);
-    [_ringView setShown:wanted && !_ring.wholeScreen && _hasNotch && !_isOpen animated:animated];
+    [_ringView setShown:lit && !_ring.wholeScreen && _hasNotch && !_isOpen animated:animated];
 
     // Around the whole screen; its top edge dips around the notch too.
-    BOOL screenShown = wanted && _ring.wholeScreen;
+    BOOL screenShown = lit && _ring.wholeScreen;
     if (screenShown) {
         if (!NSEqualRects(_overlay.frame, _screenFrame)) [_overlay setFrame:_screenFrame display:NO];
         NSRect bounds = NSMakeRect(0, 0, NSWidth(_screenFrame), NSHeight(_screenFrame));
@@ -1238,12 +1320,62 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
 }
 
 - (void)ringSettingsChanged {
+    NSString *flashKey = [NSString stringWithFormat:@"%d-%.0f-%.0f", _ring.flash, _ring.flashMin, _ring.flashMax];
+    if (![flashKey isEqual:_flashKey]) {
+        BOOL justTurnedOn = _ring.flash && _flashKey && ![_flashKey hasPrefix:@"1-"];
+        _flashKey = flashKey;
+        _flashGeneration++; // start over with the new timing
+        _flashScheduled = NO;
+        _flashOn = NO;
+        if (justTurnedOn && _store.openCount > 0 && !_ring.isPaused) {
+            _flashScheduled = YES; // show one flash right away so you can see what it looks like
+            [self flashStep:0 generation:_flashGeneration];
+        }
+    }
     [self updateRingAnimated:!_snapshotPath];
     [_settingsWindow refresh];
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(ringTick) object:nil];
     if (_ring.isPaused) {
         NSTimeInterval left = _ring.pausedUntil - NSDate.date.timeIntervalSince1970;
         [self performSelector:@selector(ringTick) withObject:nil afterDelay:left + 0.5];
+    }
+}
+
+// In flash style, keep exactly one flash scheduled while there's something to remind you of.
+- (void)keepFlashScheduled:(BOOL)wanted {
+    if (!_ring.flash || !wanted) {
+        if (_flashScheduled || _flashOn) {
+            _flashGeneration++;
+            _flashScheduled = NO;
+            _flashOn = NO;
+        }
+        return;
+    }
+    if (_flashScheduled) return;
+    _flashScheduled = YES;
+    NSUInteger generation = ++_flashGeneration;
+    NSTimeInterval delay = _ring.nextFlashDelay;
+    if (_logFlashes) NSLog(@"next flash in %.1fs", delay);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self flashStep:0 generation:generation];
+    });
+}
+
+// A flash is two quick blinks: on 0.6 s, off 0.25 s, on 1 s. Then it waits for the next random time.
+- (void)flashStep:(int)step generation:(NSUInteger)generation {
+    if (generation != _flashGeneration) return;
+    static const double kStepLengths[] = {0.6, 0.25, 1.0};
+    if (step < 3) {
+        if (step == 0 && _logFlashes) NSLog(@"flash");
+        _flashOn = step % 2 == 0;
+        [self updateRingAnimated:YES];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kStepLengths[step] * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self flashStep:step + 1 generation:generation];
+        });
+    } else {
+        _flashOn = NO;
+        _flashScheduled = NO; // lets the update below schedule the next flash
+        [self updateRingAnimated:YES];
     }
 }
 
