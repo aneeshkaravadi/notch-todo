@@ -8,6 +8,10 @@ With tasks left, a color ring moves around the closed notch:
 
 ![The color ring around the notch](docs/ring.png)
 
+Or, if you set it to, around the edges of the whole screen:
+
+![The color border around the whole screen](docs/screen.png)
+
 ## Features
 
 - Hover the notch to open it. Move the mouse away, press Esc, or click anywhere else to close it.
@@ -15,6 +19,7 @@ With tasks left, a color ring moves around the closed notch:
 - Finished tasks sink to the bottom. Clear them from the ⋯ menu.
 - While any task is unchecked, a moving color ring surrounds the notch so you can't forget about it. It disappears once everything is checked off.
 - Pick the ring's colors (Rainbow, Sunset, Ocean, Aurora, Candy or your own three), speed, saturation and brightness in ⋯ → Settings….
+- For something even harder to miss, set **Show around** to **The whole screen**: the colors run around every edge of the screen and still wrap the notch. Clicks pass straight through it.
 - You can pause the ring for 30 minutes at a time, but there's no off switch: a pause always ends on its own.
 - Open at Login toggle in the ⋯ menu.
 - Tasks are stored locally as JSON in `~/Library/Application Support/NotchTodo/todos.json`. No account, no network.
@@ -62,6 +67,7 @@ cd notch-todo
 - `--pin-open` keeps the panel open without hovering.
 - `--snapshot out.png` opens the panel, saves a picture of it, and quits. Add `--closed` to picture the closed notch and its ring instead.
 - `--snapshot-settings out.png` does the same for the Settings window.
+- `--snapshot-screen out.png` pictures the whole-screen border (add `-RingWholeScreen YES` to try it without changing your setting).
 
 ## Credits
 

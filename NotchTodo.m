@@ -66,6 +66,31 @@ static CGPathRef CreateRingPath(CGRect notch, CGFloat gap) {
     return p;
 }
 
+// A border just inside the screen's edges. Along the top it dips around the notch the same way
+// the notch ring does. Pass CGRectNull when there's no notch.
+static CGPathRef CreateScreenBorderPath(CGRect bounds, CGRect notch, CGFloat inset) {
+    const CGFloat corner = 12, gap = 4, flare = 6, radius = 10 + gap;
+    CGFloat x0 = CGRectGetMinX(bounds) + inset, x1 = CGRectGetMaxX(bounds) - inset;
+    CGFloat y0 = CGRectGetMinY(bounds) + inset, y1 = CGRectGetMaxY(bounds) - inset;
+    CGMutablePathRef p = CGPathCreateMutable();
+    CGPathMoveToPoint(p, NULL, x0 + corner, y1);
+    if (!CGRectIsNull(notch)) {
+        CGFloat left = CGRectGetMinX(notch) - gap, right = CGRectGetMaxX(notch) + gap, bottom = CGRectGetMinY(notch) - gap;
+        CGPathAddLineToPoint(p, NULL, left - flare, y1);
+        CGPathAddQuadCurveToPoint(p, NULL, left, y1, left, y1 - flare);
+        CGPathAddArcToPoint(p, NULL, left, bottom, left + radius, bottom, radius);
+        CGPathAddArcToPoint(p, NULL, right, bottom, right, bottom + radius, radius);
+        CGPathAddLineToPoint(p, NULL, right, y1 - flare);
+        CGPathAddQuadCurveToPoint(p, NULL, right, y1, right + flare, y1);
+    }
+    CGPathAddArcToPoint(p, NULL, x1, y1, x1, y1 - corner, corner);
+    CGPathAddArcToPoint(p, NULL, x1, y0, x1 - corner, y0, corner);
+    CGPathAddArcToPoint(p, NULL, x0, y0, x0, y0 + corner, corner);
+    CGPathAddArcToPoint(p, NULL, x0, y1, x0 + corner, y1, corner);
+    CGPathCloseSubpath(p);
+    return p;
+}
+
 #pragma mark - Ring settings
 
 static const NSTimeInterval kPauseLength = 30 * 60;
@@ -110,6 +135,7 @@ static NSString *HexFromColor(NSColor *color) {
 @property (nonatomic) double speed;              // 0 = slow, 1 = fast
 @property (nonatomic) double saturation;         // 0 = gray, 1 = most vivid
 @property (nonatomic) double brightness;         // 0 = dim, 1 = brightest
+@property (nonatomic) BOOL wholeScreen;          // border the whole screen instead of just the notch
 @property (nonatomic) NSTimeInterval pausedUntil; // seconds since 1970; 0 when running
 @property (nonatomic, copy) void (^onChange)(void);
 @property (nonatomic, readonly) NSArray<NSColor *> *colors;
@@ -135,6 +161,7 @@ static NSString *HexFromColor(NSColor *color) {
         _speed = [d objectForKey:@"RingSpeed"] ? MAX(0, MIN(1, [d doubleForKey:@"RingSpeed"])) : 0.5;
         _saturation = [d objectForKey:@"RingSaturation"] ? MAX(0, MIN(1, [d doubleForKey:@"RingSaturation"])) : 0.8;
         _brightness = [d objectForKey:@"RingBrightness"] ? MAX(0, MIN(1, [d doubleForKey:@"RingBrightness"])) : 0.85;
+        _wholeScreen = [d boolForKey:@"RingWholeScreen"];
         // Never honor a pause longer than 30 minutes, even if the saved value says otherwise.
         _pausedUntil = MIN([d doubleForKey:@"RingPausedUntil"], NSDate.date.timeIntervalSince1970 + kPauseLength);
     }
@@ -188,6 +215,7 @@ static NSString *HexFromColor(NSColor *color) {
     [d setDouble:_speed forKey:@"RingSpeed"];
     [d setDouble:_saturation forKey:@"RingSaturation"];
     [d setDouble:_brightness forKey:@"RingBrightness"];
+    [d setBool:_wholeScreen forKey:@"RingWholeScreen"];
     [d setDouble:_pausedUntil forKey:@"RingPausedUntil"];
     if (self.onChange) self.onChange();
 }
@@ -379,11 +407,15 @@ static NSString *HexFromColor(NSColor *color) {
 
 @end
 
-// A glowing ring hugging the notch. A conic gradient spins behind a ring-shaped mask, so the
-// colors travel around the notch without redrawing anything.
+// A glowing line in the ring's colors. A conic gradient spins behind a line-shaped mask, so the
+// colors travel along the line without redrawing anything. Draws both the ring around the notch
+// and the border around the whole screen.
 @interface RingView : NSView
-- (void)setNotchRect:(NSRect)notch colors:(NSArray<NSColor *> *)colors period:(NSTimeInterval)period
-           intensity:(double)intensity;
+@property (nonatomic) float maxFrameRate;            // 0 = the display's own rate
+@property (nonatomic, copy) void (^onHidden)(void);  // runs once a fade-out finishes
+- (instancetype)initWithFrame:(NSRect)frame coreWidth:(CGFloat)core glowWidth:(CGFloat)glow;
+- (void)setPath:(CGPathRef)path spinCenter:(CGPoint)center spinRadius:(CGFloat)radius
+         colors:(NSArray<NSColor *> *)colors period:(NSTimeInterval)period intensity:(double)intensity;
 - (void)setShown:(BOOL)shown animated:(BOOL)animated;
 @end
 
@@ -396,7 +428,7 @@ static NSString *HexFromColor(NSColor *color) {
     BOOL _shown;
 }
 
-- (instancetype)initWithFrame:(NSRect)frame {
+- (instancetype)initWithFrame:(NSRect)frame coreWidth:(CGFloat)core glowWidth:(CGFloat)glow {
     if ((self = [super initWithFrame:frame])) {
         self.wantsLayer = YES;
         _host = [CALayer layer];
@@ -411,17 +443,14 @@ static NSString *HexFromColor(NSColor *color) {
         _mask = [CALayer layer];
         _glow = [CAShapeLayer layer];
         _glow.fillColor = nil;
-        _glow.strokeColor = [NSColor colorWithWhite:1 alpha:0.35].CGColor;
-        _glow.lineWidth = 8;
+        _glow.lineWidth = glow;
         _glow.lineJoin = kCALineJoinRound;
         _glow.shadowColor = NSColor.whiteColor.CGColor;
-        _glow.shadowOpacity = 0.8;
-        _glow.shadowRadius = 4;
+        _glow.shadowRadius = glow / 2;
         _glow.shadowOffset = CGSizeZero;
         _core = [CAShapeLayer layer];
         _core.fillColor = nil;
-        _core.strokeColor = NSColor.whiteColor.CGColor;
-        _core.lineWidth = 3;
+        _core.lineWidth = core;
         _core.lineJoin = kCALineJoinRound;
         [_mask addSublayer:_glow];
         [_mask addSublayer:_core];
@@ -433,8 +462,8 @@ static NSString *HexFromColor(NSColor *color) {
 
 - (NSView *)hitTest:(NSPoint)point { return nil; }
 
-- (void)setNotchRect:(NSRect)notch colors:(NSArray<NSColor *> *)colors period:(NSTimeInterval)period
-           intensity:(double)intensity {
+- (void)setPath:(CGPathRef)path spinCenter:(CGPoint)center spinRadius:(CGFloat)radius
+         colors:(NSArray<NSColor *> *)colors period:(NSTimeInterval)period intensity:(double)intensity {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _host.frame = self.bounds;
@@ -445,15 +474,11 @@ static NSString *HexFromColor(NSColor *color) {
     _glow.strokeColor = [NSColor colorWithWhite:1 alpha:0.15 + 0.5 * intensity].CGColor;
     _glow.shadowOpacity = 0.4 + 0.6 * intensity;
     _core.strokeColor = [NSColor colorWithWhite:1 alpha:0.6 + 0.4 * intensity].CGColor;
-    CGPathRef path = CreateRingPath(notch, 4);
     _glow.path = path;
     _core.path = path;
-    CGPathRelease(path);
 
-    // Spin around the middle of the notch's top edge; the visible half of the circle is the ring.
-    CGFloat side = 2 * hypot(NSWidth(notch) / 2 + 24, NSHeight(notch) + 24);
-    _gradient.bounds = CGRectMake(0, 0, side, side);
-    _gradient.position = CGPointMake(NSMidX(notch), NSMaxY(notch));
+    _gradient.bounds = CGRectMake(0, 0, 2 * radius, 2 * radius);
+    _gradient.position = center;
     NSMutableArray *cgColors = [NSMutableArray array];
     for (int lap = 0; lap < 2; lap++) // twice around, so the whole palette shows at once
         for (NSColor *c in colors) [cgColors addObject:(__bridge id)c.CGColor];
@@ -475,6 +500,7 @@ static NSString *HexFromColor(NSColor *color) {
     spin.toValue = @(from - 2 * M_PI);
     spin.duration = MAX(_period, 0.5);
     spin.repeatCount = HUGE_VALF;
+    if (_maxFrameRate > 0) spin.preferredFrameRateRange = CAFrameRateRangeMake(_maxFrameRate / 2, _maxFrameRate, _maxFrameRate);
     [_gradient addAnimation:spin forKey:@"spin"];
 }
 
@@ -496,10 +522,43 @@ static NSString *HexFromColor(NSColor *color) {
     [CATransaction commit];
     if (!shown) { // stop spinning once it has faded, so a hidden ring costs nothing
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (!self->_shown) [self->_gradient removeAnimationForKey:@"spin"];
+            if (self->_shown) return;
+            [self->_gradient removeAnimationForKey:@"spin"];
+            if (self.onHidden) self.onHidden();
         });
     }
 }
+
+@end
+
+// A click-through window covering the whole screen, for the border around its edges.
+@interface OverlayPanel : NSPanel
+@end
+
+@implementation OverlayPanel
+
+- (instancetype)init {
+    self = [super initWithContentRect:NSZeroRect
+                            styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+                              backing:NSBackingStoreBuffered
+                                defer:NO];
+    if (self) {
+        self.opaque = NO;
+        self.backgroundColor = NSColor.clearColor;
+        self.hasShadow = NO;
+        self.ignoresMouseEvents = YES;
+        self.hidesOnDeactivate = NO;
+        self.releasedWhenClosed = NO;
+        self.level = NSMainMenuWindowLevel + 2; // over the menu bar, under the todo panel and menus
+        self.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary
+            | NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorIgnoresCycle;
+    }
+    return self;
+}
+
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeMainWindow { return NO; }
+- (NSRect)constrainFrameRect:(NSRect)frameRect toScreen:(NSScreen *)screen { return frameRect; }
 
 @end
 
@@ -587,7 +646,7 @@ static NSString *HexFromColor(NSColor *color) {
 
 @implementation SettingsWindowController {
     RingSettings *_settings;
-    NSPopUpButton *_palettePopup;
+    NSPopUpButton *_palettePopup, *_placePopup;
     NSArray<NSColorWell *> *_wells;
     NSSlider *_speedSlider, *_saturationSlider, *_brightnessSlider;
     NSTextField *_pauseStatus;
@@ -608,34 +667,44 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
 }
 
 - (void)build {
-    const CGFloat W = 444;
-    _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, W, 476)
+    const CGFloat W = 444, H = 516;
+    _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, W, H)
                                           styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                             backing:NSBackingStoreBuffered
                                               defer:NO];
     _window.title = @"NotchTodo Settings";
     _window.releasedWhenClosed = NO;
     _window.delegate = self;
-    FlippedView *view = [[FlippedView alloc] initWithFrame:NSMakeRect(0, 0, W, 476)];
+    FlippedView *view = [[FlippedView alloc] initWithFrame:NSMakeRect(0, 0, W, H)];
     view.wantsLayer = YES;
     _window.contentView = view;
     const CGFloat left = 24, field = 128, width = W - 2 * left;
 
-    [view addSubview:SettingsLabel(@"Notch ring", 13, NSFontWeightSemibold, NSColor.labelColor, NSMakeRect(left, 18, width, 18))];
-    [view addSubview:SettingsLabel(@"While any task is unchecked, a moving color ring surrounds the notch so you can't forget about it.",
+    [view addSubview:SettingsLabel(@"Color ring", 13, NSFontWeightSemibold, NSColor.labelColor, NSMakeRect(left, 18, width, 18))];
+    [view addSubview:SettingsLabel(@"While any task is unchecked, moving colors surround the notch, or the whole screen, so you can't forget about it.",
                                    12, NSFontWeightRegular, NSColor.secondaryLabelColor, NSMakeRect(left, 40, width, 32))];
 
-    [view addSubview:SettingsLabel(@"Colors", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, 89, 90, 18))];
-    _palettePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(field, 84, 170, 26) pullsDown:NO];
+    CGFloat y = 84;
+    [view addSubview:SettingsLabel(@"Show around", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, y + 5, 100, 18))];
+    _placePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(field, y, 170, 26) pullsDown:NO];
+    [_placePopup addItemsWithTitles:@[@"The notch", @"The whole screen"]];
+    _placePopup.target = self;
+    _placePopup.action = @selector(placeChanged:);
+    [view addSubview:_placePopup];
+    y += 38;
+
+    [view addSubview:SettingsLabel(@"Colors", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, y + 5, 100, 18))];
+    _palettePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(field, y, 170, 26) pullsDown:NO];
     [_palettePopup addItemsWithTitles:PaletteNames()];
     _palettePopup.target = self;
     _palettePopup.action = @selector(paletteChanged:);
     [view addSubview:_palettePopup];
+    y += 38;
 
-    [view addSubview:SettingsLabel(@"Custom", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, 127, 90, 18))];
+    [view addSubview:SettingsLabel(@"Custom", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, y + 5, 100, 18))];
     NSMutableArray *wells = [NSMutableArray array];
     for (int i = 0; i < 3; i++) {
-        NSColorWell *well = [[NSColorWell alloc] initWithFrame:NSMakeRect(field + 2 + i * 52, 122, 44, 26)];
+        NSColorWell *well = [[NSColorWell alloc] initWithFrame:NSMakeRect(field + 2 + i * 52, y, 44, 26)];
         well.colorWellStyle = NSColorWellStyleMinimal;
         well.target = self;
         well.action = @selector(customColorChanged:);
@@ -644,36 +713,32 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
     }
     _wells = wells;
     [view addSubview:SettingsLabel(@"Pick any color to switch to Custom.", 11, NSFontWeightRegular, NSColor.tertiaryLabelColor,
-                                   NSMakeRect(field + 2, 152, width - field, 15))];
+                                   NSMakeRect(field + 2, y + 30, width - field, 15))];
+    y += 62;
 
-    [view addSubview:SettingsLabel(@"Speed", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, 187, 90, 18))];
-    _speedSlider = [NSSlider sliderWithValue:0.5 minValue:0 maxValue:1 target:self action:@selector(speedChanged:)];
-    _speedSlider.frame = NSMakeRect(field, 184, width - field + left - 4, 24);
-    _speedSlider.continuous = YES;
-    [view addSubview:_speedSlider];
-    [view addSubview:SettingsLabel(@"Slow", 11, NSFontWeightRegular, NSColor.tertiaryLabelColor, NSMakeRect(field + 2, 208, 60, 15))];
-    NSTextField *fast = SettingsLabel(@"Fast", 11, NSFontWeightRegular, NSColor.tertiaryLabelColor, NSMakeRect(W - left - 60, 208, 60, 15));
-    fast.alignment = NSTextAlignmentRight;
-    [view addSubview:fast];
+    _speedSlider = [self sliderRow:@"Speed" low:@"Slow" high:@"Fast" y:y action:@selector(speedChanged:) in:view];
+    y += 56;
+    _saturationSlider = [self sliderRow:@"Saturation" low:@"Muted" high:@"Vivid" y:y action:@selector(saturationChanged:) in:view];
+    y += 56;
+    _brightnessSlider = [self sliderRow:@"Brightness" low:@"Dim" high:@"Bright" y:y action:@selector(brightnessChanged:) in:view];
+    y += 52;
 
-    _saturationSlider = [self sliderRow:@"Saturation" low:@"Muted" high:@"Vivid" y:240 action:@selector(saturationChanged:) in:view];
-    _brightnessSlider = [self sliderRow:@"Brightness" low:@"Dim" high:@"Bright" y:296 action:@selector(brightnessChanged:) in:view];
-
-    NSBox *line = [[NSBox alloc] initWithFrame:NSMakeRect(left, 348, width, 1)];
+    NSBox *line = [[NSBox alloc] initWithFrame:NSMakeRect(left, y, width, 1)];
     line.boxType = NSBoxSeparator;
     [view addSubview:line];
+    y += 18;
 
-    [view addSubview:SettingsLabel(@"Pause", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, 366, 90, 18))];
-    _pauseStatus = SettingsLabel(@"", 13, NSFontWeightRegular, NSColor.secondaryLabelColor, NSMakeRect(field + 2, 366, width - field, 18));
+    [view addSubview:SettingsLabel(@"Pause", 13, NSFontWeightRegular, NSColor.labelColor, NSMakeRect(left, y, 100, 18))];
+    _pauseStatus = SettingsLabel(@"", 13, NSFontWeightRegular, NSColor.secondaryLabelColor, NSMakeRect(field + 2, y, width - field, 18));
     [view addSubview:_pauseStatus];
     _pauseButton = [NSButton buttonWithTitle:@"Pause for 30 Minutes" target:self action:@selector(pauseClicked:)];
-    _pauseButton.frame = NSMakeRect(field - 6, 388, 176, 30);
+    _pauseButton.frame = NSMakeRect(field - 6, y + 22, 176, 30);
     [view addSubview:_pauseButton];
     _resumeButton = [NSButton buttonWithTitle:@"Resume Now" target:self action:@selector(resumeClicked:)];
-    _resumeButton.frame = NSMakeRect(field + 172, 388, 116, 30);
+    _resumeButton.frame = NSMakeRect(field + 172, y + 22, 116, 30);
     [view addSubview:_resumeButton];
     [view addSubview:SettingsLabel(@"There's no off switch. A pause always ends after 30 minutes.", 11, NSFontWeightRegular,
-                                   NSColor.tertiaryLabelColor, NSMakeRect(field + 2, 424, W - left - field - 2, 30))];
+                                   NSColor.tertiaryLabelColor, NSMakeRect(field + 2, y + 58, W - left - field - 2, 30))];
 }
 
 - (NSSlider *)sliderRow:(NSString *)title low:(NSString *)low high:(NSString *)high y:(CGFloat)y action:(SEL)action in:(NSView *)view {
@@ -701,6 +766,7 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
 
 - (void)refresh {
     if (!_window) return;
+    [_placePopup selectItemAtIndex:_settings.wholeScreen ? 1 : 0];
     [_palettePopup selectItemWithTitle:_settings.palette];
     for (NSUInteger i = 0; i < _wells.count && i < _settings.customColors.count; i++) _wells[i].color = _settings.customColors[i];
     _speedSlider.doubleValue = _settings.speed;
@@ -717,6 +783,11 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
         _pauseButton.title = @"Pause for 30 Minutes";
     }
     _resumeButton.enabled = _settings.isPaused;
+}
+
+- (void)placeChanged:(NSPopUpButton *)sender {
+    _settings.wholeScreen = sender.indexOfSelectedItem == 1;
+    [_settings save];
 }
 
 - (void)paletteChanged:(NSPopUpButton *)sender {
@@ -791,6 +862,9 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
     RingView *_ringView;
     SettingsWindowController *_settingsWindow;
     NSTimer *_ringTimer;
+    OverlayPanel *_overlay;  // click-through window for the whole-screen border
+    RingView *_screenRing;
+    NSString *_screenSnapshotPath; // `--snapshot-screen <png>` pictures the whole-screen border.
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
@@ -799,6 +873,8 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
     if (snapshotIndex != NSNotFound && snapshotIndex + 1 < args.count) _snapshotPath = args[snapshotIndex + 1];
     // `--snapshot <png> --closed` pictures the closed notch (with its ring) instead of the open panel.
     _pinned = (_snapshotPath && ![args containsObject:@"--closed"]) || [args containsObject:@"--pin-open"];
+    NSUInteger screenIndex = [args indexOfObject:@"--snapshot-screen"];
+    if (screenIndex != NSNotFound && screenIndex + 1 < args.count) _screenSnapshotPath = args[screenIndex + 1];
     NSUInteger settingsIndex = [args indexOfObject:@"--snapshot-settings"];
     if (settingsIndex != NSNotFound && settingsIndex + 1 < args.count) _settingsSnapshotPath = args[settingsIndex + 1];
     _store = [TodoStore new];
@@ -843,6 +919,12 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
             [NSApp terminate:nil];
         });
     }
+    if (_screenSnapshotPath) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self writeScreenSnapshot];
+            [NSApp terminate:nil];
+        });
+    }
     if (_settingsSnapshotPath) {
         [self showSettings:nil];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -850,6 +932,31 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
             [NSApp terminate:nil];
         });
     }
+}
+
+// Half resolution is plenty to judge the border; a gray fill and a black notch stand in for the screen.
+- (void)writeScreenSnapshot {
+    NSView *view = _overlay.contentView;
+    NSRect bounds = view.bounds;
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL
+        pixelsWide:(NSInteger)NSWidth(bounds) pixelsHigh:(NSInteger)NSHeight(bounds)
+        bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace
+        bytesPerRow:0 bitsPerPixel:0];
+    CGContextRef context = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep].CGContext;
+    CGContextSetRGBFillColor(context, 0.45, 0.5, 0.58, 1);
+    CGContextFillRect(context, bounds);
+    if (_hasNotch) {
+        NSRect notch = NSOffsetRect(_notchRect, -NSMinX(_screenFrame), -NSMinY(_screenFrame));
+        CGPathRef housing = CGPathCreateWithRoundedRect(CGRectMake(NSMinX(notch), NSMinY(notch), NSWidth(notch), NSHeight(notch) + 12), 9, 9, NULL);
+        CGContextSetRGBFillColor(context, 0, 0, 0, 1);
+        CGContextAddPath(context, housing);
+        CGContextFillPath(context);
+        CGPathRelease(housing);
+    }
+    [view displayIfNeeded];
+    [view.layer renderInContext:context];
+    [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:_screenSnapshotPath atomically:YES];
+    NSLog(@"overlay=%@ visible=%d", NSStringFromRect(_overlay.frame), _overlay.visible);
 }
 
 - (void)writeSettingsSnapshot {
@@ -915,9 +1022,16 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
     };
     _panel.contentView = _container;
 
-    _ringView = [[RingView alloc] initWithFrame:_container.bounds];
+    _ringView = [[RingView alloc] initWithFrame:_container.bounds coreWidth:3 glowWidth:8];
     _ringView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [_container addSubview:_ringView];
+
+    _overlay = [OverlayPanel new];
+    _screenRing = [[RingView alloc] initWithFrame:NSZeroRect coreWidth:4 glowWidth:16];
+    _screenRing.maxFrameRate = 30; // a full-screen animation; 30 fps keeps the battery cost down
+    __weak OverlayPanel *overlay = _overlay;
+    _screenRing.onHidden = ^{ [overlay orderOut:nil]; };
+    _overlay.contentView = _screenRing;
 
     _shapeView = [[ShapeView alloc] initWithFrame:_container.bounds];
     _shapeView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -1095,11 +1209,32 @@ static NSTextField *SettingsLabel(NSString *text, CGFloat size, NSFontWeight wei
 // Shown while any task is unchecked, the panel is closed and the ring isn't paused.
 - (void)updateRingAnimated:(BOOL)animated {
     if (!_ringView || !_ring) return;
+    BOOL wanted = _store.openCount > 0 && !_ring.isPaused;
+    NSArray<NSColor *> *colors = _ring.colors;
+
+    // Around the notch only, hidden while the panel is open (the panel covers the notch anyway).
     CGFloat w = NSWidth(_notchRect), h = NSHeight(_notchRect);
     NSRect notch = NSMakeRect([self notchCenterInPanel] - w / 2, NSHeight(_container.bounds) - h, w, h);
-    [_ringView setNotchRect:notch colors:_ring.colors period:_ring.period intensity:_ring.brightness];
-    BOOL shown = _hasNotch && _store.openCount > 0 && !_ring.isPaused && !_isOpen;
-    [_ringView setShown:shown animated:animated];
+    CGPathRef notchPath = CreateRingPath(notch, 4);
+    [_ringView setPath:notchPath spinCenter:CGPointMake(NSMidX(notch), NSMaxY(notch)) spinRadius:hypot(w / 2 + 24, h + 24)
+                colors:colors period:_ring.period intensity:_ring.brightness];
+    CGPathRelease(notchPath);
+    [_ringView setShown:wanted && !_ring.wholeScreen && _hasNotch && !_isOpen animated:animated];
+
+    // Around the whole screen; its top edge dips around the notch too.
+    BOOL screenShown = wanted && _ring.wholeScreen;
+    if (screenShown) {
+        if (!NSEqualRects(_overlay.frame, _screenFrame)) [_overlay setFrame:_screenFrame display:NO];
+        NSRect bounds = NSMakeRect(0, 0, NSWidth(_screenFrame), NSHeight(_screenFrame));
+        CGRect notchHere = _hasNotch ? NSOffsetRect(_notchRect, -NSMinX(_screenFrame), -NSMinY(_screenFrame)) : CGRectNull;
+        CGPathRef border = CreateScreenBorderPath(bounds, notchHere, 2);
+        [_screenRing setPath:border spinCenter:CGPointMake(NSMidX(bounds), NSMidY(bounds))
+                  spinRadius:hypot(NSWidth(bounds), NSHeight(bounds)) / 2 + 20
+                      colors:colors period:_ring.period intensity:_ring.brightness];
+        CGPathRelease(border);
+        [_overlay orderFrontRegardless];
+    }
+    [_screenRing setShown:screenShown animated:animated];
 }
 
 - (void)ringSettingsChanged {
